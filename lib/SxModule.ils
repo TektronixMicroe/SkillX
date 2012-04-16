@@ -1,0 +1,165 @@
+;; SxModule
+;
+; Provides mechanism to load a file. The loading behavior is as follows:
+; 1. Load only once if the file content has not changed.
+; 2. File with relative path is loaded relative to the calling file's
+;    directory,
+;
+; Reloading this SxModule.ils file will reset module stack and table, which is
+; fine in most of time. The only draw back is that requiring a file that is
+; already required, will reload the file again instead of skipping it, because
+; the SxModule information has been reset, hence costing loading time.
+;
+; SxRequire will 
+; - SxRequire(file)
+;
+;   Load file
+;
+;   Eg.
+;    (println (getWorkingDir))  => "/login/joe"
+;    (SxRequire "test2.il")     => load /some/lib/path/test2.il
+;    (SxRequire "test2.il")     => nil. Will not reload
+;
+  
+
+(inSkill
+  SxModuleVerbose = nil
+)
+
+(importSkillVar SxModuleVerbose)
+
+; Load file
+(define SxRequire nil)
+; Reset module stack. For testing purpose
+(define SxResetModules nil)
+
+(let ((SxModuleTable (makeTable 'SxModuleTable nil))
+      SxModuleStack)
+     
+  (defun SxModulePush (file "t")
+    ; Pushs to module stack, recording sequence of requires.
+    ; Returns the stack.
+    (setq SxModuleStack (cons file SxModuleStack))
+  )
+  
+  (defun SxModulePop ()
+    ; Returns the latest file required and removed if from the stack.
+    (prog1
+      (or (car SxModuleStack) "")
+      (setq SxModuleStack (cdr SxModuleStack)))
+  )
+
+  (defun SxModulePrependToSkillPath (file "t")
+    ; Prepends Skill path with 'file' directory name. No attempt is made to
+    ; figure out the absolute path name of 'file'.
+    ; Returns 'setSkillPath's return value.
+    (let ((markSkPath (member "-mark-" (getSkillPath))))
+      (if markSkPath
+        (setSkillPath (cons (SxModuleGetDirName file) markSkPath))
+        (setSkillPath (constar (SxModuleGetDirName file) "-mark-"
+                        (getSkillPath)))))
+  )
+    
+  (defun SxModulePushStack (__SxModuleFile__ "t")
+    ; Loads file '__SxModuleFile__'. Returns loading result or nil if the file
+    ; has been loaded already. May throw error
+    (let ((__SxModuleFilePath__ (SxModuleFindFile __SxModuleFile__))
+          (__SxModuleOldSkillPath__ (getSkillPath))
+          __SxModuleLoadResult__)
+          
+      (unless (isFile __SxModuleFilePath__)
+        (error "Not a file?: %s" __SxModuleFilePath__))
+
+      (unless (SxModuleIsLoaded __SxModuleFilePath__)
+        (SxModulePush __SxModuleFilePath__)
+        (SxModulePrependToSkillPath __SxModuleFilePath__)
+        
+        (when SxModuleVerbose
+          (if __SxModuleFilePath__
+            (printf "<MODULE> Loading: %s\n" __SxModuleFilePath__)
+            (printf "<MODULE> Not found: %s\n" __SxModuleFile__)))
+                
+        (setq __SxModuleLoadResult__ (errset (load __SxModuleFilePath__) t))
+        
+        (SxModulePop)
+        (setSkillPath __SxModuleOldSkillPath__)
+                
+        (if __SxModuleLoadResult__
+          (car __SxModuleLoadResult__)
+          (error "Failed to load: %s" __SxModuleFilePath__))))
+  )
+  
+  (defun SxModuleSafePushStack (file "t")
+    ; Loads file 'file'. Returns loading result or nil if the file
+    ; has been loaded already. Throws error if 'file' can't be loaded.
+    (car (or (errset (SxModulePushStack file) t)
+             (error "Bad module: %s" file)))
+  )
+  
+  (defun SxModuleGetDirName (path "t")
+    ; Returns path's directory name
+    (let (file)
+      (if (setq file (rindex path "/"))
+        (substring path 1 (strlen path) - (strlen file))
+        "."))
+  )
+  
+  (defun SxModuleIsLoaded (file "t")
+    ; Returns t if the module 'file' has been loaded, nil otherwise
+    (letseq ((signature (arrayref SxModuleTable file))
+             (sig (SxModuleSignature file))
+             (loaded (and signature (equal signature sig))))
+      
+      (when SxModuleVerbose
+        (if loaded
+          (printf "<MODULE> is loaded: %s %L\n" file signature)
+          (printf "<MODULE> new: %s %L\n" file signature)))
+          
+      (unless loaded (setarray SxModuleTable file sig))
+      loaded)
+  )
+  
+  (defun SxModuleFindFile (file)
+    ; Returns 'file' absolute path, where the file location is obtained using
+    ; Skill search path.
+    (simplifyFilename
+      (if (case (substring file 1 1) (("/" "~")))
+        file
+        (let ((source_path (car (exists sp (getSkillPath)
+                             (isFile (strcat sp "/" file))))))
+          (if source_path
+            (strcat source_path "/" file)
+            (error "Can't find in skill path: %s\nLoaded by: %s"
+              file (car SxModuleStack))))))
+  )
+    
+  (defun SxModuleSignature (file)
+    ; Returns a signature of the given 'file'
+    ; In this case, the sha
+    (let ((tempfile (strcat (getTempDir) "/"
+                      (makeTempFileName "skmoduleXXXX"))))
+      (car
+        (errset
+          (when (zerop (system (strcat "/usr/bin/sha1sum " file
+                                 " | cut -f1 -d' ' > " tempfile)))
+            (prog1
+              (let ((f (infile tempfile))
+                    sha1sum)
+                (when f 
+                  (prog1
+                    (car (errset (gets sha1sum f)))
+                    (close f))))
+              (when (isFile tempfile)
+                (system (strcat "/bin/rm " tempfile)))))
+          t)))
+  )
+
+  (defun SxModuleResetStack ()
+    ; USED FOR UNIT TEST ONLY!
+    (setq SxModuleTable (makeTable 'SxModuleTable nil))
+    (setq SxModuleStack nil)
+  )
+  
+  (setq SxRequire SxModuleSafePushStack)
+  (setq SxResetModules SxModuleResetStack)
+)
